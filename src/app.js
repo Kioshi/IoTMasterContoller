@@ -11,7 +11,8 @@ client.on('connect', () => {
     client.subscribe('interface');
 })
 
-client.on('message', (topic, message) => {
+client.on('message', (topic, data) => {
+    var message = JSON.parse(data);
     if(topic === 'interface') {
         if (!subscribedTopics.includes(message.topic))
         {
@@ -23,13 +24,14 @@ client.on('message', (topic, message) => {
     }
     if (topic.startsWith("collect/"))
     {
-        saveCollectedData(topDomain, topic.substring("collect/".length).split("/"), message.data);
+        saveCollectedData(topDomain, topic.substring("collect/".length).split("/"), message);
     }
     if (topic.startsWith("statusRequest/"))
     {
         var clearTopic = topic.substring("statusRequest/".length);
         publishStatus(topDomain, clearTopic.split("/"), clearTopic);
     }
+    console.log(topDomain);
 })
 
 function saveCollectedData(parent, parts, data) {
@@ -41,7 +43,7 @@ function saveCollectedData(parent, parts, data) {
 
     if (parts.length == 0)
     {
-        parent.childs[domain].sample.add(data);
+        parent.childs[domain].samples.push(data.value);
     }
     else
     {
@@ -144,25 +146,28 @@ function resolveCommand(topic, data, contoller) {
     if (data.reccuringEvent !== undefined && data.state === 'ON')
     {
         contoller.samples = [];
-        var interval = max(date.interval, 10000);
-        var timeout = max(5000, min(date.timeout, interval - 5000));
+        var interval = max(data.interval, 10000);
+        var timeout = max(5000, min(data.timeout, interval - 5000));
         contoller.timer = new TimerJob({
                 interval: interval,
                 autoStart: true,
-                ignoreErrors: true
+                ignoreErrors: true,
+                immediate: true
             }, function( done ) {
                 contoller.samples = [];
-                //TODO build exclude
-                var exclude = undefined;
-                semdMsg('collect', topic, {...data, ...{exclude: exclude}});
+                semdMsg('collectRequest', topic, data);
                 setTimeout( function(){
+                    if (contoller.samples.length === 0)
+                    {
+                        return;
+                    }
                     //Do average
                     let sum = contoller.samples.reduce((previous, current) => current += previous);
-                    let avg = sum / values.length;
+                    let avg = sum / contoller.samples.length;
                     //MinMax normalization
                     let value = (avg - contoller.data.min) / (contoller.data.max - contoller.data.min);
                     // If change is significant enough (or not mix change is definined)
-                    if (contoller.data.minChange && abs(contoller.data.value - value) > contoller.data.minChange)
+                    if (!contoller.data.minChange || abs(contoller.data.value - value) > contoller.data.minChange)
                     {
                         contoller.data.value = value;
                         //Send update command
@@ -177,8 +182,44 @@ function resolveCommand(topic, data, contoller) {
     semdMsg('command', topic, data);
 }
 
-// send mqtt message
-function semdMsg(channel, topic, data) {
-    client.publish(channel+'/'+topic, JSON.stringify(data));
+function min(a, b) {
+    return a < b ? a : b;
+}
+function max(a, b) {
+    return a > b ? a : b;
 }
 
+// send mqtt message
+function semdMsg(channel, topic, data) {
+    var exclude = buildExclude(findController(topDomain, topic.split("/")), topic);
+    client.publish(channel+'/'+topic, JSON.stringify({...data,...{exclude: exclude}}));
+}
+
+function findController(parent, parts) {
+    var domain = parts.shift();
+
+    if (parts.length === 0)
+    {
+        return parent.childs[domain];
+    }
+
+    return findController(parent.childs[domain], parts);
+
+}
+function buildExclude(controller, topic) {
+    var excluded = [];
+    for( var key in controller.childs) {
+        if (controller.childs.hasOwnProperty(controller)) {
+            var newTopic = topic+"/"+key;
+            if (controller.childs[key].data.state === 'AUTO')
+            {
+                excluded.concat(buildExclude(controller.childs[key], newTopic));
+            }
+            else
+            {
+                excluded.push(newTopic);
+            }
+        }
+    }
+    return excluded;
+}
